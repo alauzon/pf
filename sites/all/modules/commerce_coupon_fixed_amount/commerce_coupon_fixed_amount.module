@@ -1,0 +1,134 @@
+<?php
+
+/**
+ * @file
+ * Coupon with fixed amount.
+ */
+
+/**
+ * Implements hook_commerce_coupon_type_configure().
+ */
+function commerce_coupon_fixed_amount_commerce_coupon_type_configure($bundle, $reset = FALSE) {
+  // Skip all $bundles except the fixed coupon type
+  if ($bundle != 'commerce_coupon_fixed') {
+    return;
+  }
+
+  $entity_type = 'commerce_coupon';
+
+  // If a field type we know should exist isn't found, clear the Field cache.
+  if (!field_info_field_types('commerce_price')) {
+    field_cache_clear();
+  }
+  // Look for or add the specified fixed amount
+  $field_name = 'commerce_coupon_fixed_amount';
+  $field = field_info_field($field_name);
+  $instance = field_info_instance($entity_type, $field_name, $bundle);
+  $weight = 0;
+
+  if (empty($field) || $reset) {
+    $field_data = array(
+      'field_name' => $field_name,
+      'type' => 'commerce_price',
+      'label' => t('Fixed Amount'),
+      'cardinality' => 1,
+      'entity_types' => array($entity_type),
+      'translatable' => FALSE,
+      'locked' => FALSE,
+    );
+
+    if (empty($field)) {
+      $field = field_create_field($field_data);
+    }
+    else {
+      $field = field_update_field($field_data);
+    }
+  }
+  if (empty($instance) || $reset) {
+    $instance_data = array(
+      'field_name' => $field_name,
+      'entity_type' => $entity_type,
+      'bundle' => $bundle,
+      'label' => t('Fixed Amount'),
+      'required' => TRUE,
+      'settings' => array(),
+      // Because this widget is locked, we need it to use the full price widget
+      // since the currency option can't be adjusted at the moment.
+      'widget' => array(
+        'type' => 'commerce_price_full',
+        'weight' => $weight,
+        'settings' => array(
+          'currency_code' => 'default',
+        ),
+      ),
+      'default_value' => array(
+        array(
+          'amount' => 0,
+          'currency_code' => commerce_default_currency(),
+          'data' => array(
+            'components' => array(),
+          ),
+        ),
+      ),
+      'display' => array(),
+    );
+
+    if (empty($instance)) {
+      field_create_instance($instance_data);
+    }
+    else {
+      field_update_instance($instance_data);
+    }
+  }
+}
+
+/**
+ * Implements hook_commerce_cart_line_item_refresh().
+ */
+function commerce_coupon_fixed_amount_commerce_cart_line_item_refresh($cloned_line_item, $order_wrapper) {
+  if ($cloned_line_item->type == 'commerce_coupon') {
+    $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $cloned_line_item);
+    $coupon = $line_item_wrapper->commerce_coupon_reference->value();
+    if ($coupon->type == 'commerce_coupon_fixed') {
+      $coupon_wrapper = entity_metadata_wrapper('commerce_coupon', $coupon);
+
+      $amount = commerce_price_wrapper_value($coupon_wrapper, 'commerce_coupon_fixed_amount', TRUE);
+      // Get the price component to use in this price.
+      $price_component_name = 'commerce_coupon_' . $coupon->type;
+      drupal_alter('commerce_coupon_price_component_name', $price_component_name, $coupon);
+
+      // Remove the component type and add it again for this coupon code.
+      $line_item_wrapper->commerce_unit_price->data = commerce_price_component_delete($line_item_wrapper->commerce_unit_price->value(), $price_component_name);
+
+      if ($coupon->is_active && !commerce_price_component_load($line_item_wrapper->commerce_unit_price->value(), $price_component_name)) {
+        $line_item_wrapper->commerce_unit_price->amount = $amount['amount'] * -1;
+        $line_item_wrapper->commerce_unit_price->data = commerce_price_component_add(
+            $line_item_wrapper->commerce_unit_price->value(), $price_component_name, $line_item_wrapper->commerce_unit_price->value(), TRUE, FALSE
+        );
+
+        // Also update the coupon log entry.
+        $coupon_log = commerce_coupon_log_load_by_order_and_coupon($line_item_wrapper->order_id->value(), $coupon->coupon_id);
+        $coupon_log_wrapper = entity_metadata_wrapper('commerce_coupon_log', $coupon_log);
+        // Set the unit price on the line item object.
+        $coupon_log_wrapper->commerce_granted_amount->amount = $amount['amount'];
+        $coupon_log_wrapper->commerce_granted_amount->currency_code = $amount['currency_code'];
+
+        // Add the new granted amount to the components array.
+        if (!commerce_price_component_load($coupon_log_wrapper->commerce_granted_amount->value(), $price_component_name)) {
+          $coupon_log_wrapper->commerce_granted_amount->data = commerce_price_component_add(
+              $coupon_log_wrapper->commerce_granted_amount->value(), $price_component_name, $coupon_log_wrapper->commerce_granted_amount->value(), TRUE, FALSE
+          );
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_commerce_coupon_price_component_name_alter().
+ */
+function commerce_coupon_fixed_amount_commerce_coupon_price_component_name_alter(&$price_component_name, $coupon) {
+  if ($coupon->type == 'commerce_coupon_fixed') {
+    $price_component_name = $coupon->type . '_' . commerce_coupon_machine_name_code($coupon);
+  }
+}

@@ -1,0 +1,5 @@
+name = "Commerce - CAD"
+description = "Fix CAD display"
+core=7.x
+package = "Commerce"
+files[] = commerce_cad.module

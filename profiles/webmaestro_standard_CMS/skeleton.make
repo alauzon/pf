@@ -1,0 +1,11 @@
+core = 7.x
+projects[] = backup_migrate
+projects[] = ckeditor
+projects[] = i18n
+projects[] = l10n_client
+projects[] = l10n_update
+projects[] = languageassign
+projects[] = pathauto
+projects[] = redirect
+projects[] = token
+projects[] = variable

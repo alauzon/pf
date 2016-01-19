@@ -1,0 +1,195 @@
+<?php
+
+/**
+ * @file
+ * Coupon with percentage field.
+ */
+
+/**
+ * Implements hook_commerce_coupon_type_configure().
+ */
+function commerce_coupon_pct_commerce_coupon_type_configure($bundle, $reset = FALSE) {
+  // Skip all $bundles except the pct coupon type
+  if ($bundle != 'commerce_coupon_pct') {
+    return;
+  }
+
+  $entity_type = 'commerce_coupon';
+
+  // If a field type we know should exist isn't found, clear the Field cache.
+  if (!field_info_field_types('commerce_price')) {
+    field_cache_clear();
+  }
+
+  // Look for or add the specified percentage amount.
+  $field_name = 'commerce_coupon_percent_amount';
+  $field = field_info_field($field_name);
+  $instance = field_info_instance($entity_type, $field_name, $bundle);
+
+  if (empty($field) || $reset) {
+    $field_data = array(
+      'field_name' => $field_name,
+      'type' => 'number_decimal',
+      'label' => t('Percentage Amount'),
+      'cardinality' => 1,
+      'entity_types' => array($entity_type),
+      'translatable' => FALSE,
+      'locked' => FALSE,
+      'settings' => array(
+        'decimal_separator' => '.',
+        'precision' => '10',
+        'scale' => '2',
+      ),
+    );
+
+    if (empty($field)) {
+      $field = field_create_field($field_data);
+    }
+    else {
+      $field = field_update_field($field_data);
+    }
+  }
+
+  if (empty($instance) || $reset) {
+    $instance_data = array(
+      'field_name' => $field_name,
+      'entity_type' => $entity_type,
+      'bundle' => $bundle,
+      'label' => t('Percentage Amount'),
+      'required' => TRUE,
+      'display' => array(),
+      'settings' => array(
+        'min' => '0',
+        'max' => '100',
+        'suffix' => '%',
+      ),
+    );
+
+    if (empty($instance)) {
+      field_create_instance($instance_data);
+    }
+    else {
+      field_update_instance($instance_data);
+    }
+  }
+}
+
+/**
+ * Implements hook_commerce_cart_line_item_refresh().
+ */
+function commerce_coupon_pct_commerce_cart_line_item_refresh($cloned_line_item, $order_wrapper) {
+  // First check the order to see if we have percentage coupons by looking at
+  // the coupon log.
+  $order = $order_wrapper->value();
+  $coupons = commerce_coupon_get_coupons_by_order($order->order_id);
+
+  // Loop all the percentage coupons and add the price components to the line
+  // items.
+  if (!empty($coupons)) {
+    $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $cloned_line_item);
+    foreach ($coupons as $coupon) {
+      if ($coupon->type == 'commerce_coupon_pct') {
+        $coupon_wrapper = entity_metadata_wrapper('commerce_coupon', $coupon);
+        $rate = $coupon_wrapper->commerce_coupon_percent_amount->value();
+        if ($rate > 1) {
+          // Ensure that the rate is never bigger then 100%
+          $rate = $rate / 100;
+          // Calculate the total granted amount for this line item
+          $unit_price = commerce_price_wrapper_value($line_item_wrapper, 'commerce_unit_price', TRUE);
+
+          // Let's assume a round mode by now.
+          $amount = commerce_round(COMMERCE_ROUND_HALF_UP, $unit_price['amount'] * $rate * -1);
+          $price_component = array(
+            'amount' => $amount,
+            'currency_code' => $unit_price['currency_code'],
+            'data' => array(),
+          );
+
+          // Get the price component to use in this price.
+          $price_component_name = 'commerce_coupon_' . $coupon->type;
+          drupal_alter('commerce_coupon_price_component_name', $price_component_name, $coupon);
+
+          $line_item_wrapper->commerce_unit_price->amount = $line_item_wrapper->commerce_unit_price->amount->value() + $amount;
+          // Update the data array with the coupon component.
+          if ($coupon->is_active && !commerce_price_component_load($line_item_wrapper->commerce_unit_price->value(), $price_component_name)) {
+            $line_item_wrapper->commerce_unit_price->data = commerce_price_component_add(
+                $line_item_wrapper->commerce_unit_price->value(), $price_component_name, $price_component, TRUE
+            );
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_commerce_cart_order_refresh().
+ */
+function commerce_coupon_pct_commerce_cart_order_refresh($order_wrapper) {
+  // First check the order to see if we have percentage coupons by looking at
+  // the coupon log.
+  $order = $order_wrapper->value();
+  $coupons = commerce_coupon_get_coupons_by_order($order->order_id);
+  // Loop all the percentage coupons and update the coupon log price components.
+  if (!empty($coupons)) {
+    foreach ($coupons as $coupon) {
+      // Get the price component to use in this price.
+      $price_component_name = 'commerce_coupon_' . $coupon->type;
+      drupal_alter('commerce_coupon_price_component_name', $price_component_name, $coupon);
+
+      // The total amount has been already calculated in the line item refresh,
+      // so get the price components out of the line items and sum them up.
+      $amount = 0;
+      foreach ($order_wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+        if ($line_item_wrapper->value()) {
+          $unit_price = commerce_price_wrapper_value($line_item_wrapper, 'commerce_unit_price', TRUE);
+          $component_prices = commerce_price_component_load($unit_price, $price_component_name);
+          foreach ($component_prices as $component_price) {
+            $amount += $component_price['price']['amount'] * -1 * $line_item_wrapper->quantity->value();
+          }
+        }
+      }
+
+      $commerce_coupon_log = commerce_coupon_log_load_by_order_and_coupon($order->order_id, $coupon->coupon_id);
+      $commerce_coupon_log = entity_metadata_wrapper('commerce_coupon_log', $commerce_coupon_log);
+
+      // Set the unit price on the coupon log object.
+      $commerce_coupon_log->commerce_granted_amount->amount = $amount;
+
+      // Add the granted amount to the components array.
+      if (!commerce_price_component_load($commerce_coupon_log->commerce_granted_amount->value(), $price_component_name)) {
+        $commerce_coupon_log->commerce_granted_amount->data = commerce_price_component_add(
+            $commerce_coupon_log->commerce_granted_amount->value(), $price_component_name, $commerce_coupon_log->commerce_granted_amount->value(), TRUE, FALSE
+        );
+      }
+
+      commerce_coupon_log_save($commerce_coupon_log->value());
+    }
+  }
+}
+
+/**
+ * Helper function to calculate the total amount for a given percentage coupon
+ * on all the line items from an order.
+ */
+function commerce_coupon_pct_calculate_total_amount($order_wrapper, $rate, $round_mode = COMMERCE_ROUND_HALF_UP) {
+  $amount = 0;
+  // Loop over every line item on the order...
+  foreach ($order_wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+    if ($line_item_wrapper->value()) {
+      // Calculate the total granted amount for this line item
+      $unit_price = commerce_price_wrapper_value($line_item_wrapper, 'commerce_unit_price', TRUE);
+      $amount += commerce_round($round_mode, $unit_price['amount'] * $rate);
+    }
+  }
+  return $amount;
+}
+
+/**
+ * Implements hook_commerce_coupon_price_component_name_alter().
+ */
+function commerce_coupon_pct_commerce_coupon_price_component_name_alter(&$price_component_name, $coupon) {
+  if ($coupon->type == 'commerce_coupon_pct') {
+    $price_component_name = $coupon->type . '_' . commerce_coupon_machine_name_code($coupon);
+  }
+}

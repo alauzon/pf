@@ -1,0 +1,13 @@
+<?php
+/**
+* Implements hook_commerce_currency_info_alter().
+*
+* Because the default display of CAD is awful
+*/
+function commerce_cad_commerce_currency_info_alter(&$currencies, $langcode) {
+  $currencies['CAD']['symbol'] = ' $';
+  $currencies['CAD']['symbol_placement'] = 'after';
+  $currencies['CAD']['code_placement'] = '';
+  $currencies['CAD']['decimal_separator'] = ',';
+  $currencies['CAD']['thousands_separator'] = ' ';
+}

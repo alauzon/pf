@@ -1,0 +1,186 @@
+diff --git a/taxonomy_menu.module b/taxonomy_menu.module
+index 3c20a4a..dab921d 100644
+--- a/taxonomy_menu.module
++++ b/taxonomy_menu.module
+@@ -24,6 +24,37 @@ function taxonomy_menu_help($path, $arg) {
+ }
+ 
+ /**
++ * Implements hook_form_alter().
++ *
++ * Disable the fields and operations in the menu forms that would will be
++ * overwritten by any change in the taxonomy terms.
++ */
++function taxonomy_menu_form_alter(&$form, &$form_state, $form_id) {
++  // Disable the fields that come from the taxonomy term.
++  if ($form_id == 'menu_edit_item') {
++    if ($tid = _taxonomy_menu_get_tid($form['mlid']['#value'])) {
++      $form['link_title']['#disabled'] = TRUE;
++      $form['description']['#disabled'] = TRUE;
++      $form['parent']['#disabled'] = TRUE;
++      // @todo I couldnt make it work but I didn't try a lot ;) Probably the weight of this module have to be greater than i18n ?
++      $form['language']['#disabled'] = TRUE;
++    }
++  }
++
++  // Delete operations in translate tab.
++  if ($form_id == 'i18n_string_translate_page_overview_form') {
++    $item = $form['object']['#value']->get_object();
++    if (property_exists('item', 'mlid')) {
++      if ($tid = _taxonomy_menu_get_tid($item->mlid)) {
++        foreach($form['languages']['#rows'] as $lang => $row) {
++          $form['languages']['#rows'][$lang]['operations'] = '';
++        }
++      }
++    }
++  }
++}
++
++/**
+  * Implements hook_form_FORM_ID_alter().
+  */
+ function taxonomy_menu_form_taxonomy_form_vocabulary_alter(&$form, &$form_state) {
+@@ -135,6 +166,21 @@ function taxonomy_menu_menu_links_delete($vid) {
+ function taxonomy_menu_menu_link_prepare($term, $menu_name) {
+   static $weight = 0;
+   $langcode = isset($term->language) ? $term->language : LANGUAGE_NONE;
++  $term_name = $term->name;
++  $term_description = $term->description;
++  // Get the right langcodes for terms with entity translation enabled.
++  if (module_exists('entity_translation') && isset($term->translations->data)) {
++    $lang_default = language_default('language');
++    if (isset($term->translations->data[$lang_default])) {
++      $langcode_original = $lang_default;
++    }
++    else {
++      $langcode_original = $term->translations->original;
++    }
++    $langcode = LANGUAGE_NONE;
++    $term_name = _taxonomy_menu_term_field_value($term, 'name_field', $langcode_original);
++    $term_description = _taxonomy_menu_term_field_value($term, 'description_field', $langcode_original, 'text_summary_or_trimmed');
++  }
+   $recursive_count = FALSE;
+ 
+   // Count nodes attached to a taxonomy term if the settings require it.
+@@ -170,16 +216,19 @@ function taxonomy_menu_menu_link_prepare($term, $menu_name) {
+   // Empty terms.
+   $menu_link['hidden'] = isset($is_hidden) ? $is_hidden : 0;
+ 
++   if (empty($term_description)) {
++    $term_description = $term_name;
++   }
+   // Menu link title.
+-  $menu_link['link_title'] = $term->name;
++  $menu_link['link_title'] = $term_name;
+   if ($display_count && $nodes_count > 0) {
+     $menu_link['link_title'] .= " (" . $nodes_count . ")";
+   }
+   // HTML title attribute.
+   if (taxonomy_menu_variable_get('display_title_attr', $term->vid, TRUE)) {
+-    $term_description = taxonomy_menu_variable_get('term_item_description', $term->vid, 0);
++    $use_term_description = taxonomy_menu_variable_get('term_item_description', $term->vid, 0);
+   }
+-  $menu_link['options']['attributes']['title'] = (isset($term_description) && $term_description == 1) ? trim($term->description) : '';
++  $menu_link['options']['attributes']['title'] = (isset($use_term_description) && $use_term_description == 1) ? trim($term_description) : '';
+   // Path.
+   $link_path = taxonomy_menu_path_get($term);
+   $menu_link['link_path'] = drupal_get_normal_path($link_path, $langcode);
+@@ -218,8 +267,13 @@ function taxonomy_menu_menu_link_load($term, $langcode){
+     $menu_link['hidden'] = 0;
+     $menu_link['weight'] = $term->weight;
+     $menu_link['has_children'] = 1;
+-    $menu_link['language'] = $langcode;
++    $menu_link['language'] = module_exists('i18n_menu') ? LANGUAGE_NONE : $langcode;
+     $menu_link['taxonomy_menu']['update'] = FALSE;
++    // i18n requirements for menu item.
++    if (module_exists('i18n_menu')) {
++      $menu_link['options']['alter'] = TRUE;
++      $menu_link['customized'] = 1;
++    }
+   }
+ 
+   return $menu_link;
+@@ -308,6 +362,34 @@ function taxonomy_menu_taxonomy_menu_save($term, $menu_link, $mlid) {
+   if ($menu_link['taxonomy_menu']['update'] == FALSE) {
+     _taxonomy_menu_insert_menu_item($mlid, $term->tid, $term->vid, $menu_link['language']);
+   }
++  // i18n and entity translation integration.
++  // Update the translations of a taxonomy term in the menu.
++  // The menu uses i18n to be translated.
++  // The taxonomy term uses entity_translation to be translated.
++  if (module_exists('i18n_menu') && module_exists('entity_translation') && isset($term->translations->data)) {
++    $i18n_title = $i18n_description = array('menu', 'item', $mlid);
++    array_push($i18n_title, 'title');
++    array_push($i18n_description, 'description');
++
++    i18n_string_remove($i18n_title);
++    i18n_string_remove($i18n_description);
++
++    foreach ($term->translations->data as $langcode => $data) {
++      $translated_name = _taxonomy_menu_term_field_value($term, 'name_field', $langcode);
++      if (!empty($translated_name)) {
++        i18n_string_translation_update($i18n_title, $translated_name, $langcode, $menu_link['link_title']);
++      }
++      if (isset($menu_link['options']['attributes']['title'])) {
++        $translated_description = _taxonomy_menu_term_field_value($term, 'description_field', $langcode, 'text_summary_or_trimmed');
++        if (empty($translated_description) && !empty($translated_name)) {
++          $translated_description = $translated_name;
++        }
++        if (!empty($translated_description)) {
++          i18n_string_translation_update($i18n_description, $translated_description, $langcode, $menu_link['options']['attributes']['title']);
++        }
++      }
++    }
++  }
+ }
+ 
+ /**
+@@ -374,6 +456,48 @@ function taxonomy_menu_node_delete($node) {
+ }
+ 
+ /**
++ * Implements hook_entity_translation_delete()
++ *
++ * Erase the menu item translation in the deleted term language.
++ */
++function taxonomy_menu_entity_translation_delete($entity_type, $entity, $langcode) {
++  if ($entity_type == 'taxonomy_term') {
++    $vid = $entity->vid;
++    if ($mlid = _taxonomy_menu_get_mlid($entity->tid, $vid)) {
++      $i18n_title = $i18n_description = array('menu', 'item', $mlid);
++      array_push($i18n_title, 'title');
++      array_push($i18n_description, 'description');
++      i18n_string_translation_update($i18n_title, '', $langcode);
++      i18n_string_translation_update($i18n_description, '', $langcode);
++    }
++  }
++}
++
++/**
++ * Get the value of a field in a specified language and format.
++ *
++ * @param $term
++ *   the taxonomy term.
++ * @param $field_name
++ *   the field name of the taxonomy term where to get the value.
++ * @param $langcode
++ *   the language code of the value to get.
++ * @param $field_formatter
++ *   the field formatter to use to get the value.
++ * @param $settings
++ *   settings for the formatter.
++ *
++ * @return the field value.
++ */
++function _taxonomy_menu_term_field_value($term, $field_name, $langcode, $field_formatter = 'text_plain', $settings = array('trim_length' => '100')) {
++  $display = array('label' => 'hidden', 'type' => $field_formatter, 'settings' => $settings);
++  $field_item = field_get_items('taxonomy_term', $term, $field_name, $langcode);
++  $field_value = field_view_value('taxonomy_term', $term, $field_name, $field_item[0], $display, $langcode);
++  $field_rendered = ($field_formatter == 'text_plain') ? render($field_value) : strip_tags(render($field_value));
++  return $field_rendered;
++}
++
++/**
+  * Abstraction of hook_node_<op>().
+  *
+  * @param $node
